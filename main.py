@@ -69,7 +69,7 @@ SEASON_BASE   = datetime.now().year
 NBA_LEAGUE_ID = 12
 MLB_LEAGUE_ID = 1
 
-MM_PROB_THRESHOLD = 0.60
+MM_PROB_THRESHOLD = 0.52  # Más permisivo — muestra líneas con prob >= 52%
 
 BROWSER_HDR = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
@@ -980,27 +980,68 @@ def best_h2h_pick(probs, odds, home, away, has_draw):
 
 
 def filter_mm_picks(probs, all_totals, model, unit):
+    """
+    Muestra las líneas Más/Menos más probables según el modelo.
+    Sin importar edge — el foco es mostrar el análisis de probabilidad.
+    Solo filtra las que tienen probabilidad >= MM_PROB_THRESHOLD.
+    """
     results = []
-    lam_h = probs.get("lam_h"); lam_a = probs.get("lam_a"); exp_t = probs.get("exp_total")
+    lam_h = probs.get("lam_h")
+    lam_a = probs.get("lam_a")
+    exp_t = probs.get("exp_total")
+
+    # Si no hay líneas de la API, genera una línea estimada con el total esperado
+    if not all_totals and exp_t:
+        # Línea estimada basada en el total esperado del modelo
+        line_est = round(exp_t - 0.5, 1) if exp_t else None
+        if line_est:
+            all_totals = [{"line": line_est, "over_odds": 1.85, "under_odds": 1.95}]
+
     for t in all_totals:
         line = t["line"]
+        if line <= 0:
+            continue
+
+        # Calcula probabilidades según el modelo
         if model == "poisson" and lam_h and lam_a:
             mas_p, menos_p = poisson_line_prob(lam_h, lam_a, line)
-        elif exp_t:
-            sigma   = 2.8 if "base" in model else max(exp_t*0.06, 2.0)
+        elif exp_t and exp_t > 0:
+            if "base" in model:      sigma = 2.8   # béisbol
+            elif "bball" in model:   sigma = max(exp_t * 0.06, 3.0)  # basket
+            else:                    sigma = 1.5   # general
             nd      = NormalDist(exp_t, sigma)
-            menos_p = nd.cdf(line); mas_p = 1.0-menos_p
+            menos_p = nd.cdf(line)
+            mas_p   = 1.0 - menos_p
         else:
             continue
-        if mas_p >= MM_PROB_THRESHOLD and t["over_odds"] > 1:
-            e = edge(mas_p, t["over_odds"])
-            if e > 0:
-                results.append({"label":f"Más de {line} {unit}","prob":mas_p,"odds":t["over_odds"],"edge":e})
-        if menos_p >= MM_PROB_THRESHOLD and t["under_odds"] > 1:
-            e = edge(menos_p, t["under_odds"])
-            if e > 0:
-                results.append({"label":f"Menos de {line} {unit}","prob":menos_p,"odds":t["under_odds"],"edge":e})
-    return sorted(results, key=lambda x: x["edge"], reverse=True)
+
+        # Elige el más probable de los dos
+        if mas_p >= menos_p and mas_p >= MM_PROB_THRESHOLD:
+            e = edge(mas_p, t["over_odds"]) if t["over_odds"] > 1 else 0
+            results.append({
+                "label": f"Más de {line} {unit}",
+                "prob":  mas_p,
+                "odds":  t["over_odds"] if t["over_odds"] > 1 else 0,
+                "edge":  e,
+            })
+        elif menos_p > mas_p and menos_p >= MM_PROB_THRESHOLD:
+            e = edge(menos_p, t["under_odds"]) if t["under_odds"] > 1 else 0
+            results.append({
+                "label": f"Menos de {line} {unit}",
+                "prob":  menos_p,
+                "odds":  t["under_odds"] if t["under_odds"] > 1 else 0,
+                "edge":  e,
+            })
+
+    # Elimina duplicados de línea — queda solo la más probable por línea
+    seen = set()
+    unique = []
+    for r in sorted(results, key=lambda x: x["prob"], reverse=True):
+        if r["label"] not in seen:
+            seen.add(r["label"])
+            unique.append(r)
+
+    return unique[:3]  # Máximo 3 líneas por partido
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1039,15 +1080,19 @@ def render_match_card(icon, home, away, gtime, h2h_pick, mm_picks):
             st.caption("Sin valor en ganador")
 
         if mm_picks:
-            st.markdown("**Más / Menos**")
+            st.markdown("**📊 Más / Menos**")
             for mp in mm_picks:
-                col1, col2 = st.columns([3, 1])
+                col1, col2, col3 = st.columns([3, 1, 1])
                 with col1:
-                    st.markdown(f"→ {mp['label']}")
+                    st.markdown(f"→ **{mp['label']}**")
                 with col2:
-                    st.markdown(f"**{mp['prob']*100:.0f}%** &nbsp; @ {mp['odds']:.2f}")
+                    st.markdown(f"**{mp['prob']*100:.0f}%**")
+                with col3:
+                    if mp.get("odds", 0) > 1:
+                        edge_color = "🟢" if mp["edge"] > 0 else "🔴"
+                        st.caption(f"{edge_color} {mp['edge']:+.1f}%")
         else:
-            st.caption("Sin líneas Más/Menos con valor suficiente")
+            st.caption("📊 Sin datos suficientes para Más/Menos")
 
         st.divider()
 
@@ -1057,24 +1102,29 @@ def render_combinada(value_picks):
         st.info("Sin picks con valor suficiente para armar combinada hoy.")
         return
 
-    cuota = math.prod(p["odds"] for p in value_picks)
-    prob  = math.prod(p["prob"] for p in value_picks)
+    # Toma los 4 mejores picks por probabilidad — no todos
+    best = sorted(value_picks, key=lambda x: x["prob"], reverse=True)[:4]
+
+    cuota = math.prod(p["odds"] for p in best if p.get("odds",0) > 1)
+    prob  = math.prod(p["prob"] for p in best)
 
     st.markdown("### 🎯 Combinada del día")
+    st.caption(f"Top {len(best)} picks por probabilidad")
 
-    for p in value_picks:
-        col1, col2 = st.columns([4, 1])
+    for p in best:
+        col1, col2 = st.columns([5, 1])
         with col1:
-            st.markdown(f"**{p['label']}** — {p['match']}")
+            st.markdown(f"**{p['label']}**  \n{p['match']}")
         with col2:
-            st.markdown(f"@ **{p['odds']:.2f}**")
+            st.markdown(f"**{p['prob']*100:.0f}%**")
 
     st.markdown("---")
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("Cuota combinada", f"{cuota:.2f}")
+        st.metric("Probabilidad combinada", f"{prob*100:.1f}%")
     with col2:
-        st.metric("Probabilidad estimada", f"{prob*100:.1f}%")
+        if cuota > 1:
+            st.metric("Cuota referencial", f"{cuota:.2f}")
 
 
 def render_backtest_stats(stats):
