@@ -968,289 +968,149 @@ def combine_general(home, away, hist_home, hist_away, sofa_sig, odds_move, has_d
 # ══════════════════════════════════════════════════════════════════
 
 def best_h2h_pick(probs, odds, home, away, has_draw):
-    """Retorna el pick con mayor edge. Usa nombre real del equipo."""
     cands = [
         (home, probs["home"], odds["home"]),
         (away, probs["away"], odds["away"]),
     ]
     if has_draw and odds["draw"] > 1:
         cands.append(("Empate", probs.get("draw", 0), odds["draw"]))
-
-    ranked = [
-        {"label": l, "prob": p, "odds": o, "edge": edge(p, o)}
-        for l, p, o in cands if o > 1
-    ]
+    ranked = [{"label":l,"prob":p,"odds":o,"edge":edge(p,o)} for l,p,o in cands if o>1]
     ranked.sort(key=lambda x: x["edge"], reverse=True)
     return ranked[0] if ranked else None
 
 
 def filter_mm_picks(probs, all_totals, model, unit):
-    """Solo las líneas que el modelo considera probables (>= 60%) con edge positivo."""
     results = []
-    lam_h = probs.get("lam_h")
-    lam_a = probs.get("lam_a")
-    exp_t = probs.get("exp_total")
-
+    lam_h = probs.get("lam_h"); lam_a = probs.get("lam_a"); exp_t = probs.get("exp_total")
     for t in all_totals:
         line = t["line"]
-
         if model == "poisson" and lam_h and lam_a:
             mas_p, menos_p = poisson_line_prob(lam_h, lam_a, line)
         elif exp_t:
-            sigma   = 2.8 if "base" in model else max(exp_t * 0.06, 2.0)
+            sigma   = 2.8 if "base" in model else max(exp_t*0.06, 2.0)
             nd      = NormalDist(exp_t, sigma)
-            menos_p = nd.cdf(line)
-            mas_p   = 1.0 - menos_p
+            menos_p = nd.cdf(line); mas_p = 1.0-menos_p
         else:
             continue
-
         if mas_p >= MM_PROB_THRESHOLD and t["over_odds"] > 1:
             e = edge(mas_p, t["over_odds"])
             if e > 0:
-                results.append({
-                    "label": f"Más de {line} {unit}",
-                    "prob":  mas_p,
-                    "odds":  t["over_odds"],
-                    "edge":  e,
-                })
-
+                results.append({"label":f"Más de {line} {unit}","prob":mas_p,"odds":t["over_odds"],"edge":e})
         if menos_p >= MM_PROB_THRESHOLD and t["under_odds"] > 1:
             e = edge(menos_p, t["under_odds"])
             if e > 0:
-                results.append({
-                    "label": f"Menos de {line} {unit}",
-                    "prob":  menos_p,
-                    "odds":  t["under_odds"],
-                    "edge":  e,
-                })
-
+                results.append({"label":f"Menos de {line} {unit}","prob":menos_p,"odds":t["under_odds"],"edge":e})
     return sorted(results, key=lambda x: x["edge"], reverse=True)
 
 
 # ══════════════════════════════════════════════════════════════════
-#  13. UI — SIMPLE Y DIRECTO
+#  13. UI — STREAMLIT NATIVO, SIN HTML
 # ══════════════════════════════════════════════════════════════════
 
 def render_match_card(icon, home, away, gtime, h2h_pick, mm_picks):
-    """
-    Tarjeta limpia por partido:
-    - Hora y equipos
-    - Ganador con % de probabilidad
-    - Líneas Más/Menos posibles
-    """
-    # Color de fondo según nivel de valor del pick principal
-    if h2h_pick and h2h_pick["edge"] > 3:
-        card_border = "#22c55e"
-    elif h2h_pick and h2h_pick["edge"] > 0:
-        card_border = "#eab308"
-    else:
-        card_border = "#e2e8f0"
+    with st.container():
+        st.markdown(f"**{icon} {home} vs {away}** &nbsp;&nbsp; ⏰ {gtime}")
 
-    # Armar contenido de Más/Menos
-    mm_html = ""
-    for mp in mm_picks:
-        mm_html += f"""
-        <div style="display:flex;justify-content:space-between;align-items:center;
-             padding:6px 0;border-top:1px solid #f1f5f9">
-          <span style="font-size:0.85rem;color:#475569">{mp['label']}</span>
-          <span style="font-size:0.85rem;font-weight:700;color:#1649a0">
-            {mp['prob']*100:.0f}%
-          </span>
-        </div>"""
+        if h2h_pick:
+            edge_v = h2h_pick['edge']
+            if edge_v > 3:
+                badge = "✅ GANA"
+                color = "green"
+            elif edge_v > 0:
+                badge = "⚠️ POSIBLE GANADOR"
+                color = "orange"
+            else:
+                badge = "🚫 SIN VALOR"
+                color = "red"
 
-    if not mm_picks:
-        mm_html = '<div style="font-size:0.8rem;color:#94a3b8;padding-top:6px">Sin líneas Más/Menos con valor suficiente</div>'
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.markdown(f":{color}[**{badge}**]")
+                st.markdown(f"### {h2h_pick['label']}")
+            with col2:
+                st.metric(
+                    label="Probabilidad",
+                    value=f"{h2h_pick['prob']*100:.0f}%",
+                    delta=f"Edge {h2h_pick['edge']:+.1f}%",
+                    delta_color="normal"
+                )
+            st.caption(f"Cuota: {h2h_pick['odds']:.2f}")
+        else:
+            st.caption("Sin valor en ganador")
 
-    # Pick ganador
-    if h2h_pick:
-        winner_html = f"""
-        <div style="display:flex;justify-content:space-between;align-items:center;margin:10px 0">
-          <div>
-            <div style="font-size:0.65rem;font-weight:700;color:#64748b;
-                 text-transform:uppercase;letter-spacing:0.06em;margin-bottom:2px">
-                 {"✅ GANA" if h2h_pick['edge'] > 3 else "⚠️ POSIBLE GANADOR"}
-            </div>
-            <div style="font-size:1.15rem;font-weight:800;color:#0a0f1e">
-              {h2h_pick['label']}
-            </div>
-          </div>
-          <div style="text-align:right">
-            <div style="font-size:2rem;font-weight:800;color:#1649a0;line-height:1">
-              {h2h_pick['prob']*100:.0f}%
-            </div>
-            <div style="font-size:0.72rem;color:#94a3b8;font-family:monospace">
-              Cuota {h2h_pick['odds']:.2f} · Edge {h2h_pick['edge']:+.1f}%
-            </div>
-          </div>
-        </div>"""
-    else:
-        winner_html = '<div style="font-size:0.85rem;color:#94a3b8;margin:10px 0">Sin valor en ganador</div>'
+        if mm_picks:
+            st.markdown("**Más / Menos**")
+            for mp in mm_picks:
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.markdown(f"→ {mp['label']}")
+                with col2:
+                    st.markdown(f"**{mp['prob']*100:.0f}%** &nbsp; @ {mp['odds']:.2f}")
+        else:
+            st.caption("Sin líneas Más/Menos con valor suficiente")
 
-    st.markdown(f"""
-<div style="background:white;border-radius:14px;padding:18px 22px;
-     margin-bottom:14px;border-left:4px solid {card_border};
-     box-shadow:0 1px 4px rgba(0,0,0,0.06)">
-
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-    <div style="font-size:1rem;font-weight:700;color:#0a0f1e">
-      {icon} {home} vs {away}
-    </div>
-    <div style="font-size:0.75rem;color:#94a3b8;font-family:monospace">⏰ {gtime}</div>
-  </div>
-
-  {winner_html}
-
-  <div style="margin-top:8px">
-    <div style="font-size:0.65rem;font-weight:700;color:#64748b;
-         text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px">
-      Más / Menos
-    </div>
-    {mm_html}
-  </div>
-
-</div>""", unsafe_allow_html=True)
+        st.divider()
 
 
 def render_combinada(value_picks):
-    """Combinada limpia: un pick por línea, cuota total grande al final."""
     if not value_picks:
-        st.markdown("""
-<div style="background:#f8fafc;border-radius:12px;padding:16px 20px;
-     color:#94a3b8;text-align:center;font-size:0.9rem">
-  Sin picks con valor suficiente para armar combinada hoy
-</div>""", unsafe_allow_html=True)
+        st.info("Sin picks con valor suficiente para armar combinada hoy.")
         return
 
     cuota = math.prod(p["odds"] for p in value_picks)
-    prob  = math.prod(p["prob"]  for p in value_picks)
+    prob  = math.prod(p["prob"] for p in value_picks)
 
-    rows = ""
+    st.markdown("### 🎯 Combinada del día")
+
     for p in value_picks:
-        rows += f"""
-<div style="display:flex;justify-content:space-between;align-items:center;
-     padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.1)">
-  <div>
-    <div style="font-size:0.75rem;color:#93c5fd">{p['match']}</div>
-    <div style="font-size:0.92rem;font-weight:700;color:white">{p['label']}</div>
-  </div>
-  <div style="text-align:right">
-    <div style="font-size:0.92rem;font-weight:700;color:white">@ {p['odds']:.2f}</div>
-    <div style="font-size:0.72rem;color:#93c5fd">{p['prob']*100:.0f}%</div>
-  </div>
-</div>"""
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            st.markdown(f"**{p['label']}** — {p['match']}")
+        with col2:
+            st.markdown(f"@ **{p['odds']:.2f}**")
 
-    st.markdown(f"""
-<div style="background:linear-gradient(135deg,#0d2247,#1649a0);
-     border-radius:16px;padding:22px 26px;color:white">
-
-  <div style="font-size:0.65rem;font-weight:700;letter-spacing:0.1em;
-       text-transform:uppercase;color:#93c5fd;margin-bottom:12px">
-    🎯 Combinada del día — {len(value_picks)} selecciones
-  </div>
-
-  {rows}
-
-  <div style="display:flex;gap:24px;margin-top:16px;flex-wrap:wrap">
-    <div>
-      <div style="font-size:0.65rem;color:#93c5fd;text-transform:uppercase;margin-bottom:4px">
-        Cuota combinada
-      </div>
-      <div style="font-size:2.2rem;font-weight:800;letter-spacing:-0.02em">
-        {cuota:.2f}
-      </div>
-    </div>
-    <div>
-      <div style="font-size:0.65rem;color:#93c5fd;text-transform:uppercase;margin-bottom:4px">
-        Probabilidad estimada
-      </div>
-      <div style="font-size:2.2rem;font-weight:800;letter-spacing:-0.02em">
-        {prob*100:.1f}%
-      </div>
-    </div>
-  </div>
-
-</div>""", unsafe_allow_html=True)
+    st.markdown("---")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Cuota combinada", f"{cuota:.2f}")
+    with col2:
+        st.metric("Probabilidad estimada", f"{prob*100:.1f}%")
 
 
 def render_backtest_stats(stats):
     if stats["total"] == 0:
-        st.caption("Sin historial aún. Los picks de hoy se verificarán mañana.")
+        st.caption("Sin historial aún.")
         return
-    col  = "#22c55e" if stats["accuracy"] >= 55 else "#f59e0b" if stats["accuracy"] >= 45 else "#ef4444"
-    pcol = "#22c55e" if stats["profit"] >= 0 else "#ef4444"
-    st.markdown(f"""
-<div style="background:#0f172a;border-radius:10px;padding:10px 12px;margin-bottom:8px;
-     display:flex;gap:12px">
-  <div style="flex:1;text-align:center">
-    <div style="font-size:0.58rem;color:#64748b;text-transform:uppercase;font-weight:700">Acierto</div>
-    <div style="font-size:1.3rem;font-weight:800;color:{col}">{stats['accuracy']}%</div>
-    <div style="font-size:0.62rem;color:#64748b">{stats['correct']}/{stats['total']}</div>
-  </div>
-  <div style="flex:1;text-align:center">
-    <div style="font-size:0.58rem;color:#64748b;text-transform:uppercase;font-weight:700">P&L</div>
-    <div style="font-size:1.3rem;font-weight:800;color:{pcol}">{stats['profit']:+.2f}u</div>
-    <div style="font-size:0.62rem;color:#64748b">por unidad</div>
-  </div>
-</div>""", unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Acierto", f"{stats['accuracy']}%",
+                  delta=f"{stats['correct']}/{stats['total']} picks")
+    with col2:
+        st.metric("P&L", f"{stats['profit']:+.2f}u")
     for mkt, d in stats["by_market"].items():
         if d["total"] > 0:
-            acc = d["correct"] / d["total"] * 100
+            acc = d["correct"]/d["total"]*100
             st.caption(f"{mkt}: {acc:.0f}% ({d['correct']}/{d['total']})")
 
 
 # ══════════════════════════════════════════════════════════════════
-#  14. STREAMLIT APP
+#  14. APP
 # ══════════════════════════════════════════════════════════════════
 
-st.set_page_config(page_title="BetAnalyzer Pro", page_icon="🎯",
+st.set_page_config(page_title="LoyaltyBets", page_icon="🎯",
                    layout="wide", initial_sidebar_state="expanded")
-
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap');
-* { font-family:'IBM Plex Sans',sans-serif !important; }
-[data-testid="stAppViewContainer"] { background:#f0f4f8; }
-[data-testid="stHeader"]           { background:transparent; }
-[data-testid="stSidebar"]          { background:#0a0f1e; }
-[data-testid="stSidebar"] *        { color:#c9d6e3 !important; }
-[data-testid="stSidebar"] h2       { color:#e8edf5 !important; }
-[data-testid="stSidebar"] .stTextInput input {
-    background:#151c2e; border:1px solid #2d3a50;
-    color:#e8edf5 !important; border-radius:8px; }
-.hero { background:linear-gradient(135deg,#0a0f1e 0%,#0d2247 50%,#1649a0 100%);
-    border-radius:18px; padding:36px 44px; margin-bottom:24px; color:white; }
-.hero h1 { margin:0; font-size:2.1rem; font-weight:800; letter-spacing:-0.02em; }
-.hero p  { margin:6px 0 0; color:#93c5fd; font-size:0.92rem; }
-.hero-meta { margin-top:14px; color:#7dd3fc; font-size:0.76rem;
-             font-family:'IBM Plex Mono',monospace; }
-.sport-hdr { font-size:0.64rem; font-weight:700; letter-spacing:0.1em;
-    text-transform:uppercase; color:#64748b; margin:24px 0 10px;
-    padding-left:10px; border-left:3px solid #1649a0; }
-</style>
-""", unsafe_allow_html=True)
 
 now_cl = datetime.now(CHILE_TZ)
 today  = now_cl.strftime("%Y-%m-%d")
 
-st.markdown(f"""
-<div class="hero">
-  <h1>🎯 LoyaltyBets</h1>
-  <p>Análisis deportivo · Picks del día · Combinada</p>
-  <div class="hero-meta">
-    📅 {now_cl.strftime("%-d de %B, %Y")} &nbsp;|&nbsp;
-    🕐 {now_cl.strftime("%H:%M")} (Chile) &nbsp;|&nbsp; Partidos del día
-  </div>
-</div>
-""", unsafe_allow_html=True)
+st.title("🎯 LoyaltyBets")
+st.caption(f"📅 {now_cl.strftime('%-d de %B, %Y')} &nbsp;|&nbsp; 🕐 {now_cl.strftime('%H:%M')} (Chile) &nbsp;|&nbsp; Partidos del día")
+st.markdown("---")
 
-# ── Sidebar ───────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚙️ Configuración")
-    odds_key = st.text_input("🔑 Odds API Key", type="password",
-                             placeholder="the-odds-api.com")
-    apif_key = st.text_input("🔑 API-Sports Key", type="password",
-                             placeholder="api-sports.io (gratis)")
-
+    odds_key = st.text_input("🔑 Odds API Key", type="password")
+    apif_key = st.text_input("🔑 API-Sports Key", type="password")
     st.markdown("---")
     st.markdown("## 📊 Historial")
     if apif_key:
@@ -1264,18 +1124,13 @@ with st.sidebar:
             for p in stats.get("history", [])[:15]:
                 icon = "✅" if p.get("correct") else "❌" if p.get("correct") is False else "⏳"
                 st.caption(f"{icon} {p['date']} · {p['pick_label'][:22]} @ {p['pick_odds']} · {p.get('result','Pendiente')}")
-
     st.markdown("---")
     st.markdown("""
-🟢 **Edge > 3%** → Valor real  
-🟡 **Edge 0–3%** → Marginal  
-🚫 **Edge < 0%** → No apostar  
+🟢 **Edge > 3%** → Valor  
+🟡 **0–3%** → Marginal  
+🚫 **< 0%** → No apostar
+""")
 
-Más/Menos: solo líneas con  
-probabilidad ≥ 60% y edge positivo.
-""", unsafe_allow_html=True)
-
-# ── Main ──────────────────────────────────────────────────────────
 if not odds_key or not apif_key:
     st.info("👈 Ingresa ambas keys en el panel izquierdo.")
     st.stop()
@@ -1306,13 +1161,12 @@ if st.button("🔄 Analizar partidos de hoy", use_container_width=True):
             with st.spinner("Cargando equipos MLB..."):
                 mlb_teams_cache = mlb_all_teams()
 
-        st.markdown(f'<div class="sport-hdr">{sport_name} — {len(games)} partido(s)</div>',
-                    unsafe_allow_html=True)
+        st.subheader(f"{sport_name} — {len(games)} partido(s)")
 
         bar = st.progress(0)
 
         for i, game in enumerate(games):
-            bar.progress((i + 1) / len(games))
+            bar.progress((i+1)/len(games))
 
             home      = game["home_team"]
             away      = game["away_team"]
@@ -1324,12 +1178,10 @@ if st.button("🔄 Analizar partidos de hoy", use_container_width=True):
             if h2h_o["home"] <= 1 and h2h_o["away"] <= 1:
                 continue
 
-            # Movimiento de cuotas
             opening  = get_opening_odds(odds_key, game.get("_sport_key",""), game.get("id",""))
             odds_mov = odds_movement_signal(opening, h2h_o)
             sofa_sig = get_sofa_signal(home, away, sofa_events)
 
-            # ── Señal + modelo por deporte ────────────────────────
             if cfg["model"] == "poisson":
                 with st.spinner(f"🔬 Analizando {home} vs {away}..."):
                     apif_sig = build_football_signal(home, away, apif_fixtures, apif_key)
@@ -1360,11 +1212,9 @@ if st.button("🔄 Analizar partidos de hoy", use_container_width=True):
                                          sofa_sig, odds_mov, cfg["has_draw"])
                 fix_id = None
 
-            # ── Picks ────────────────────────────────────────────
             h2h_pick = best_h2h_pick(probs, h2h_o, home, away, cfg["has_draw"])
             mm_picks  = filter_mm_picks(probs, all_tots, cfg["model"], cfg["unit"])
 
-            # Guardar backtesting
             if h2h_pick:
                 bt.save_pick(match_lbl, sport_name, h2h_pick["label"],
                              h2h_pick["odds"], h2h_pick["prob"], h2h_pick["edge"],
@@ -1374,19 +1224,15 @@ if st.button("🔄 Analizar partidos de hoy", use_container_width=True):
                              mp["odds"], mp["prob"], mp["edge"],
                              fixture_id=fix_id, home=home, away=away)
 
-            # Agregar a combinada solo picks con edge > 3%
             if h2h_pick and h2h_pick["edge"] > 3:
                 all_value_picks.append({**h2h_pick, "match": match_lbl})
             for mp in mm_picks:
                 if mp["edge"] > 3:
                     all_value_picks.append({**mp, "match": match_lbl})
 
-            # ── Render tarjeta limpia ─────────────────────────────
             render_match_card(cfg["icon"], home, away, gtime, h2h_pick, mm_picks)
 
         bar.progress(1.0)
 
-    # ── Combinada del día ─────────────────────────────────────────
     st.markdown("---")
-    st.markdown("## 🎯 Combinada del día")
     render_combinada(all_value_picks)
