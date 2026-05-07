@@ -64,7 +64,7 @@ FOREBET_URL   = "https://www.forebet.com/en/football-tips-and-predictions-for-to
 
 CHILE_TZ      = timezone(timedelta(hours=-4))
 SEASON_FOOT   = datetime.now().year
-SEASON_BBALL  = "2024-2025"
+SEASON_BBALL  = "2025-2026"
 SEASON_BASE   = datetime.now().year
 NBA_LEAGUE_ID = 12
 MLB_LEAGUE_ID = 1
@@ -81,9 +81,6 @@ SPORTS = {
         "odds_keys": [
             "soccer_epl","soccer_spain_la_liga","soccer_italy_serie_a",
             "soccer_germany_bundesliga","soccer_france_ligue_one",
-            "soccer_conmebol_copa_libertadores","soccer_chile_campeonato",
-            "soccer_argentina_primera_division","soccer_mexico_ligamx",
-            "soccer_brazil_campeonato","soccer_usa_mls",
             "soccer_uefa_champs_league","soccer_uefa_europa_league",
         ],
         "has_draw": True,  "model": "poisson",
@@ -445,26 +442,21 @@ def apib_h2h(team1_id, team2_id, key, last=8):
 
 def build_basketball_signal(home, away, key):
     """
-    Construye señal completa de API-Basketball para un partido NBA.
+    Señal NBA desde API-Basketball.
+    Usa forma reciente (últimos 5) que ya incluye pts/partido y win%.
+    Optimizado para usar mínimo de requests.
     """
     all_teams = apib_all_teams(key)
     home_t    = apib_find_team(home, all_teams)
     away_t    = apib_find_team(away, all_teams)
-    if not home_t or not away_t: return {}
+    if not home_t or not away_t:
+        return {}
 
-    home_id = home_t.get("id"); away_id = away_t.get("id")
-    sig = {}
+    home_id = home_t.get("id")
+    away_id = away_t.get("id")
+    sig     = {}
 
-    # Stats de temporada
-    hs = apib_team_stats(home_id, key)
-    if hs: sig["home_stats"] = hs
-    time.sleep(0.3)
-
-    as_ = apib_team_stats(away_id, key)
-    if as_: sig["away_stats"] = as_
-    time.sleep(0.3)
-
-    # Forma reciente
+    # Forma reciente — ya incluye win%, pts_for_pg, pts_ag_pg
     hf = apib_team_form(home_id, key)
     if hf: sig["home_form"] = hf
     time.sleep(0.3)
@@ -472,6 +464,17 @@ def build_basketball_signal(home, away, key):
     af = apib_team_form(away_id, key)
     if af: sig["away_form"] = af
     time.sleep(0.3)
+
+    # Stats de temporada completa como respaldo
+    if not hf:
+        hs = apib_team_stats(home_id, key)
+        if hs: sig["home_stats"] = hs
+        time.sleep(0.3)
+
+    if not af:
+        as_ = apib_team_stats(away_id, key)
+        if as_: sig["away_stats"] = as_
+        time.sleep(0.3)
 
     # H2H
     h2h = apib_h2h(home_id, away_id, key)
@@ -881,56 +884,81 @@ def combine_basketball(home, away, apib_sig, sofa_sig, hist_home, hist_away, odd
 def combine_baseball(home, away, apibb_sig, mlb_home, mlb_away, sofa_sig, odds_move):
     """
     Béisbol — Pythagorean (exp 1.83) + API-Baseball + MLB Stats API + Sofascore
+
+    Ajustes vs versión anterior:
+    1. Filtro de récord mínimo — equipos con < 45% win no se recomiendan
+    2. Forma reciente pesa más que promedio temporada
+    3. Ventaja local MLB calibrada a +6% (antes +4%)
+    4. Edge mínimo para béisbol: 4% (aplicado en best_h2h_pick)
     """
-    # Combina API-Baseball con MLB Stats API (promedio ponderado si ambos disponibles)
-    apib_hs=apibb_sig.get("home_form") or apibb_sig.get("home_stats") or {}
-    apib_as=apibb_sig.get("away_form") or apibb_sig.get("away_stats") or {}
+    MLB_MIN_WIN_PCT = 0.45  # Equipos con récord peor que esto no se recomiendan
+
+    apib_hs = apibb_sig.get("home_form") or apibb_sig.get("home_stats") or {}
+    apib_as = apibb_sig.get("away_form") or apibb_sig.get("away_stats") or {}
 
     def merge_stat(key, apib_val, mlb_val, default):
-        v1=apib_val.get(key); v2=mlb_val.get(key)
-        if v1 and v2: return (v1+v2)/2
+        v1 = apib_val.get(key); v2 = mlb_val.get(key)
+        # Forma reciente pesa 60%, temporada 40%
+        if v1 and v2: return v1 * 0.60 + v2 * 0.40
         return v1 or v2 or default
 
-    rs_h=max(min(merge_stat("runs_scored_pg", apib_hs, mlb_home, 4.5),9.0),2.0)
-    ra_h=max(min(merge_stat("runs_allowed_pg",apib_hs, mlb_home, 4.5),9.0),2.0)
-    rs_a=max(min(merge_stat("runs_scored_pg", apib_as, mlb_away, 4.5),9.0),2.0)
-    ra_a=max(min(merge_stat("runs_allowed_pg",apib_as, mlb_away, 4.5),9.0),2.0)
+    rs_h = max(min(merge_stat("runs_scored_pg",  apib_hs, mlb_home, 4.5), 9.0), 2.0)
+    ra_h = max(min(merge_stat("runs_allowed_pg", apib_hs, mlb_home, 4.5), 9.0), 2.0)
+    rs_a = max(min(merge_stat("runs_scored_pg",  apib_as, mlb_away, 4.5), 9.0), 2.0)
+    ra_a = max(min(merge_stat("runs_allowed_pg", apib_as, mlb_away, 4.5), 9.0), 2.0)
 
-    hw=max(min(pythagorean(rs_h,ra_h,1.83)+0.04,0.85),0.15)
-    aw=1.0-hw
+    # Pythagorean con ventaja local calibrada a +6% para MLB
+    hw = max(min(pythagorean(rs_h, ra_h, 1.83) + 0.06, 0.85), 0.15)
+    aw = 1.0 - hw
+
+    # Filtro de récord mínimo — penaliza equipos con mal récord
+    home_win_pct = mlb_home.get("win_pct") or apib_hs.get("win_pct") or 0.5
+    away_win_pct = mlb_away.get("win_pct") or apib_as.get("win_pct") or 0.5
+
+    if home_win_pct < MLB_MIN_WIN_PCT:
+        hw *= 0.90  # Penaliza 10% a equipos en racha negativa
+    if away_win_pct < MLB_MIN_WIN_PCT:
+        aw *= 0.90
+
+    # Normaliza después de penalización
+    tot_raw = hw + aw
+    hw = hw / tot_raw; aw = aw / tot_raw
 
     # Ajuste H2H
-    h2h=apibb_sig.get("h2h")
+    h2h = apibb_sig.get("h2h")
     if h2h:
-        adj=(h2h["win_pct"]-0.5)*0.08; hw=max(min(hw+adj,0.85),0.15); aw=1.0-hw
+        adj = (h2h["win_pct"] - 0.5) * 0.08
+        hw = max(min(hw + adj, 0.85), 0.15); aw = 1.0 - hw
 
     # Sofascore
-    l2_h=l2_a=None
+    l2_h = l2_a = None
     if sofa_sig:
-        sf_tot=sofa_sig["home_form"]+sofa_sig["away_form"]
-        l2_h=sofa_sig["home_form"]/sf_tot if sf_tot>0 else 0.5
-        l2_a=1.0-l2_h
+        sf_tot = sofa_sig["home_form"] + sofa_sig["away_form"]
+        l2_h = sofa_sig["home_form"] / sf_tot if sf_tot > 0 else 0.5
+        l2_a = 1.0 - l2_h
 
-    has_apibb=bool(apib_hs); has_mlb=bool(mlb_home); has_l2=l2_h is not None
-    om=odds_move or {"home":0.0,"away":0.0}
+    has_apibb = bool(apib_hs); has_mlb = bool(mlb_home); has_l2 = l2_h is not None
+    om = odds_move or {"home": 0.0, "away": 0.0}
 
-    if has_apibb and has_mlb and has_l2: w_base,w_l2,w_om=0.70,0.20,0.10
-    elif (has_apibb or has_mlb) and has_l2: w_base,w_l2,w_om=0.70,0.20,0.10
-    elif has_apibb or has_mlb: w_base,w_l2,w_om=0.90,0.00,0.10
-    else: w_base,w_l2,w_om=0.90,0.00,0.10
+    if has_apibb and has_mlb and has_l2:   w_base, w_l2, w_om = 0.70, 0.20, 0.10
+    elif (has_apibb or has_mlb) and has_l2: w_base, w_l2, w_om = 0.70, 0.20, 0.10
+    elif has_apibb or has_mlb:              w_base, w_l2, w_om = 0.90, 0.00, 0.10
+    else:                                   w_base, w_l2, w_om = 0.90, 0.00, 0.10
 
-    ch=hw*w_base+(l2_h or hw)*w_l2+max(min(hw+om["home"],0.95),0.05)*w_om
-    ca=aw*w_base+(l2_a or aw)*w_l2+max(min(aw+om["away"],0.95),0.05)*w_om
-    tot=ch+ca or 1.0
-    exp_total=round((rs_h+ra_a)/2,2)
+    ch = hw * w_base + (l2_h or hw) * w_l2 + max(min(hw + om["home"], 0.95), 0.05) * w_om
+    ca = aw * w_base + (l2_a or aw) * w_l2 + max(min(aw + om["away"], 0.95), 0.05) * w_om
+    tot = ch + ca or 1.0
+    exp_total = round((rs_h + ra_a) / 2, 2)
 
     return {
-        "home":ch/tot,"away":ca/tot,"draw":0.0,
-        "exp_total":exp_total,
-        "rs_home":round(rs_h,2),"ra_home":round(ra_h,2),
-        "has_l1":has_apibb or has_mlb,"has_l2":has_l2,
-        "has_l3":bool(om["home"]!=0 or om["away"]!=0),
-        "src":"API-Baseball + MLB Stats API",
+        "home": ch/tot, "away": ca/tot, "draw": 0.0,
+        "exp_total": exp_total,
+        "rs_home": round(rs_h, 2), "ra_home": round(ra_h, 2),
+        "home_win_pct": round(home_win_pct, 3),
+        "away_win_pct": round(away_win_pct, 3),
+        "has_l1": has_apibb or has_mlb, "has_l2": has_l2,
+        "has_l3": bool(om["home"] != 0 or om["away"] != 0),
+        "src": "API-Baseball + MLB Stats API",
     }
 
 
@@ -967,14 +995,22 @@ def combine_general(home, away, hist_home, hist_away, sofa_sig, odds_move, has_d
 #  12. PICKS
 # ══════════════════════════════════════════════════════════════════
 
-def best_h2h_pick(probs, odds, home, away, has_draw):
+def best_h2h_pick(probs, odds, home, away, has_draw, model=""):
+    """
+    Retorna el pick con mayor edge.
+    Para béisbol exige edge mínimo de 4% (más estricto).
+    """
+    MIN_EDGE = 4.0 if model == "pythagorean_base" else 0.0
+
     cands = [
         (home, probs["home"], odds["home"]),
         (away, probs["away"], odds["away"]),
     ]
     if has_draw and odds["draw"] > 1:
         cands.append(("Empate", probs.get("draw", 0), odds["draw"]))
-    ranked = [{"label":l,"prob":p,"odds":o,"edge":edge(p,o)} for l,p,o in cands if o>1]
+
+    ranked = [{"label":l,"prob":p,"odds":o,"edge":edge(p,o)}
+              for l,p,o in cands if o>1 and edge(p,o) >= MIN_EDGE]
     ranked.sort(key=lambda x: x["edge"], reverse=True)
     return ranked[0] if ranked else None
 
@@ -982,66 +1018,90 @@ def best_h2h_pick(probs, odds, home, away, has_draw):
 def filter_mm_picks(probs, all_totals, model, unit):
     """
     Muestra las líneas Más/Menos más probables según el modelo.
-    Sin importar edge — el foco es mostrar el análisis de probabilidad.
-    Solo filtra las que tienen probabilidad >= MM_PROB_THRESHOLD.
+
+    Filtros aplicados:
+    1. Línea mínima por deporte — ignora líneas triviales donde la cuota no paga
+    2. Cuota mínima 1.60 — si la cuota es menor no vale la pena apostar
+    3. Probabilidad mínima >= MM_PROB_THRESHOLD
+    4. Edge positivo requerido
     """
+
+    # Líneas mínimas por deporte — por debajo de esto la cuota es demasiado baja
+    MIN_LINE = {
+        "pythagorean_base":  7.5,   # Béisbol: mínimo 7.5 carreras
+        "pythagorean_bball": 200.0, # Basketball: mínimo 200 puntos
+        "poisson":           1.5,   # Fútbol: mínimo 1.5 goles
+        "general":           20.0,  # Tenis: mínimo 20 games
+    }
+    MIN_ODDS = 1.60  # Cuota mínima para que valga apostar
+
+    min_line = MIN_LINE.get(model, 1.5)
+
     results = []
     lam_h = probs.get("lam_h")
     lam_a = probs.get("lam_a")
     exp_t = probs.get("exp_total")
 
-    # Si no hay líneas de la API, genera una línea estimada con el total esperado
+    # Si no hay líneas de la API, genera una estimada con el total esperado
     if not all_totals and exp_t:
-        # Línea estimada basada en el total esperado del modelo
-        line_est = round(exp_t - 0.5, 1) if exp_t else None
-        if line_est:
-            all_totals = [{"line": line_est, "over_odds": 1.85, "under_odds": 1.95}]
+        line_est = round(max(exp_t - 0.5, min_line), 1)
+        all_totals = [{"line": line_est, "over_odds": 1.85, "under_odds": 1.95}]
 
     for t in all_totals:
         line = t["line"]
-        if line <= 0:
+
+        # Filtro 1: línea mínima por deporte
+        if line < min_line:
             continue
+
+        # Filtro 2: cuota mínima
+        over_odds  = t.get("over_odds", 0)
+        under_odds = t.get("under_odds", 0)
 
         # Calcula probabilidades según el modelo
         if model == "poisson" and lam_h and lam_a:
             mas_p, menos_p = poisson_line_prob(lam_h, lam_a, line)
         elif exp_t and exp_t > 0:
-            if "base" in model:      sigma = 2.8   # béisbol
-            elif "bball" in model:   sigma = max(exp_t * 0.06, 3.0)  # basket
-            else:                    sigma = 1.5   # general
+            if "base" in model:     sigma = 2.8
+            elif "bball" in model:  sigma = max(exp_t * 0.06, 3.0)
+            else:                   sigma = 1.5
             nd      = NormalDist(exp_t, sigma)
             menos_p = nd.cdf(line)
             mas_p   = 1.0 - menos_p
         else:
             continue
 
-        # Elige el más probable de los dos
-        if mas_p >= menos_p and mas_p >= MM_PROB_THRESHOLD:
-            e = edge(mas_p, t["over_odds"]) if t["over_odds"] > 1 else 0
+        # Evalúa Más
+        if (mas_p >= MM_PROB_THRESHOLD
+                and over_odds >= MIN_ODDS
+                and edge(mas_p, over_odds) > 0):
             results.append({
                 "label": f"Más de {line} {unit}",
                 "prob":  mas_p,
-                "odds":  t["over_odds"] if t["over_odds"] > 1 else 0,
-                "edge":  e,
+                "odds":  over_odds,
+                "edge":  edge(mas_p, over_odds),
             })
-        elif menos_p > mas_p and menos_p >= MM_PROB_THRESHOLD:
-            e = edge(menos_p, t["under_odds"]) if t["under_odds"] > 1 else 0
+
+        # Evalúa Menos
+        if (menos_p >= MM_PROB_THRESHOLD
+                and under_odds >= MIN_ODDS
+                and edge(menos_p, under_odds) > 0):
             results.append({
                 "label": f"Menos de {line} {unit}",
                 "prob":  menos_p,
-                "odds":  t["under_odds"] if t["under_odds"] > 1 else 0,
-                "edge":  e,
+                "odds":  under_odds,
+                "edge":  edge(menos_p, under_odds),
             })
 
-    # Elimina duplicados de línea — queda solo la más probable por línea
+    # Queda solo la mejor línea por dirección (Más / Menos)
     seen = set()
     unique = []
-    for r in sorted(results, key=lambda x: x["prob"], reverse=True):
+    for r in sorted(results, key=lambda x: x["edge"], reverse=True):
         if r["label"] not in seen:
             seen.add(r["label"])
             unique.append(r)
 
-    return unique[:3]  # Máximo 3 líneas por partido
+    return unique[:2]  # Máximo 2 líneas por partido
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1262,7 +1322,7 @@ if st.button("🔄 Analizar partidos de hoy", use_container_width=True):
                                          sofa_sig, odds_mov, cfg["has_draw"])
                 fix_id = None
 
-            h2h_pick = best_h2h_pick(probs, h2h_o, home, away, cfg["has_draw"])
+            h2h_pick = best_h2h_pick(probs, h2h_o, home, away, cfg["has_draw"], cfg["model"])
             mm_picks  = filter_mm_picks(probs, all_tots, cfg["model"], cfg["unit"])
 
             if h2h_pick:
