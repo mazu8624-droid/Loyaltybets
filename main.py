@@ -69,11 +69,80 @@ SEASON_BASE   = datetime.now().year
 NBA_LEAGUE_ID = 12
 MLB_LEAGUE_ID = 1
 
-MM_PROB_THRESHOLD = 0.52  # Más permisivo — muestra líneas con prob >= 52%
+MM_PROB_THRESHOLD = 0.52
 
 BROWSER_HDR = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
     "Accept-Language": "en-US,en;q=0.9",
+}
+
+# ── Park Factors MLB (run environment relativo al promedio liga = 1.0) ──
+MLB_PARK_FACTORS = {
+    "Colorado Rockies":     1.32,  # Coors Field — altitud extrema
+    "Cincinnati Reds":      1.09,
+    "Boston Red Sox":       1.08,  # Fenway Park
+    "Chicago Cubs":         1.07,  # Wrigley Field
+    "Philadelphia Phillies":1.05,
+    "Baltimore Orioles":    1.04,
+    "Texas Rangers":        1.03,
+    "New York Yankees":     1.00,
+    "Houston Astros":       1.00,
+    "Atlanta Braves":       1.00,
+    "Chicago White Sox":    0.99,
+    "Detroit Tigers":       0.99,
+    "Kansas City Royals":   0.99,
+    "Minnesota Twins":      0.98,
+    "Toronto Blue Jays":    0.98,
+    "Los Angeles Angels":   0.97,
+    "Cleveland Guardians":  0.97,
+    "Arizona Diamondbacks": 0.97,
+    "Pittsburgh Pirates":   0.97,
+    "St. Louis Cardinals":  0.96,
+    "Los Angeles Dodgers":  0.95,
+    "New York Mets":        0.95,
+    "Washington Nationals": 0.95,
+    "Athletics":            0.94,
+    "Tampa Bay Rays":       0.93,
+    "Miami Marlins":        0.93,
+    "San Diego Padres":     0.93,
+    "Seattle Mariners":     0.92,
+    "San Francisco Giants": 0.90,  # Oracle Park — pitcher friendly
+}
+
+# ── Coordenadas de estadios MLB para clima ──
+MLB_STADIUM_COORDS = {
+    "New York Yankees":     (40.830, -73.926),
+    "Boston Red Sox":       (42.347, -71.097),
+    "Chicago Cubs":         (41.948, -87.655),
+    "Chicago White Sox":    (41.830, -87.634),
+    "Los Angeles Dodgers":  (34.074, -118.240),
+    "Los Angeles Angels":   (33.800, -117.883),
+    "San Francisco Giants": (37.778, -122.389),
+    "Oakland Athletics":    (37.752, -122.201),
+    "Athletics":            (37.752, -122.201),
+    "Seattle Mariners":     (47.591, -122.332),
+    "Texas Rangers":        (32.748, -97.082),
+    "Houston Astros":       (29.757, -95.355),
+    "Minnesota Twins":      (44.982, -93.278),
+    "Detroit Tigers":       (42.339, -83.049),
+    "Cleveland Guardians":  (41.496, -81.685),
+    "Kansas City Royals":   (39.052, -94.481),
+    "Toronto Blue Jays":    (43.641, -79.389),
+    "Baltimore Orioles":    (39.284, -76.622),
+    "Tampa Bay Rays":       (27.768, -82.653),
+    "New York Mets":        (40.757, -73.846),
+    "Philadelphia Phillies":(39.906, -75.166),
+    "Atlanta Braves":       (33.891, -84.468),
+    "Miami Marlins":        (25.778, -80.220),
+    "Washington Nationals": (38.873, -77.007),
+    "Cincinnati Reds":      (39.098, -84.507),
+    "Pittsburgh Pirates":   (40.447, -80.006),
+    "Milwaukee Brewers":    (43.028, -87.971),
+    "St. Louis Cardinals":  (38.623, -90.193),
+    "Chicago White Sox":    (41.830, -87.634),
+    "Colorado Rockies":     (39.756, -104.994),
+    "Arizona Diamondbacks": (33.446, -112.067),
+    "San Diego Padres":     (32.707, -117.157),
 }
 
 SPORTS = {
@@ -825,7 +894,8 @@ def combine_football(home, away, apif_sig, forebet, sofa_sig, hist_home, hist_aw
     }
 
 
-def combine_basketball(home, away, apib_sig, sofa_sig, hist_home, hist_away, odds_move):
+def combine_basketball(home, away, apib_sig, sofa_sig, hist_home, hist_away, odds_move,
+                       home_rest_factor=0.0, away_rest_factor=0.0):
     """
     Basketball — Pythagorean (exp 13.91) + API-Basketball + Sofascore
     """
@@ -847,7 +917,9 @@ def combine_basketball(home, away, apib_sig, sofa_sig, hist_home, hist_away, odd
     if h2h:
         adj=(h2h["win_pct"]-0.5)*0.08; hw=max(min(hw+adj,0.85),0.15); aw=1.0-hw
 
-    # Señal Sofascore
+    # Días de descanso — factor crítico en playoffs NBA
+    hw = max(min(hw + home_rest_factor - away_rest_factor, 0.85), 0.15)
+    aw = 1.0 - hw
     l2_h=l2_a=None
     if sofa_sig:
         sf_tot=sofa_sig["home_form"]+sofa_sig["away_form"]
@@ -869,7 +941,8 @@ def combine_basketball(home, away, apib_sig, sofa_sig, hist_home, hist_away, odd
         +(l2_a or aw)*w2+max(min(aw+om["away"],0.95),0.05)*w3)
 
     tot=ch+ca or 1.0
-    exp_total=round((pts_h_for+pts_a_for)/2,1)
+    # Total esperado = puntos local + puntos visitante (NO dividir por 2)
+    exp_total=round(pts_h_for + pts_a_for, 1)
 
     return {
         "home":ch/tot,"away":ca/tot,"draw":0.0,
@@ -881,24 +954,218 @@ def combine_basketball(home, away, apib_sig, sofa_sig, hist_home, hist_away, odd
     }
 
 
-def combine_baseball(home, away, apibb_sig, mlb_home, mlb_away, sofa_sig, odds_move):
-    """
-    Béisbol — Pythagorean (exp 1.83) + API-Baseball + MLB Stats API + Sofascore
+# ══════════════════════════════════════════════════════════════════
+#  NUEVAS SEÑALES — Pitcher, Clima, Factor Estadio, Descanso
+# ══════════════════════════════════════════════════════════════════
 
-    Ajustes vs versión anterior:
-    1. Filtro de récord mínimo — equipos con < 45% win no se recomiendan
-    2. Forma reciente pesa más que promedio temporada
-    3. Ventaja local MLB calibrada a +6% (antes +4%)
-    4. Edge mínimo para béisbol: 4% (aplicado en best_h2h_pick)
+def get_probable_pitchers(home_team, away_team, date_str):
     """
-    MLB_MIN_WIN_PCT = 0.45  # Equipos con récord peor que esto no se recomiendan
+    Obtiene los pitchers probables del día desde MLB Stats API.
+    Retorna (home_pitcher_era, away_pitcher_era) o (None, None).
+    """
+    try:
+        r = requests.get(
+            f"{MLB_BASE}/schedule",
+            params={"sportId": 1, "date": date_str,
+                    "hydrate": "probablePitcher,linescore,team"},
+            timeout=10
+        )
+        if r.status_code != 200:
+            return None, None
+
+        for date_entry in r.json().get("dates", []):
+            for game in date_entry.get("games", []):
+                gh = game.get("teams", {}).get("home", {}).get("team", {}).get("name", "")
+                ga = game.get("teams", {}).get("away", {}).get("team", {}).get("name", "")
+
+                if not (fuzzy_match(home_team, gh) and fuzzy_match(away_team, ga)):
+                    continue
+
+                home_p = game.get("teams", {}).get("home", {}).get("probablePitcher", {})
+                away_p = game.get("teams", {}).get("away", {}).get("probablePitcher", {})
+
+                def get_era(pitcher_data):
+                    if not pitcher_data:
+                        return None
+                    pid = pitcher_data.get("id")
+                    if not pid:
+                        return None
+                    try:
+                        ps = requests.get(
+                            f"{MLB_BASE}/people/{pid}/stats",
+                            params={"stats": "season", "group": "pitching",
+                                    "season": SEASON_BASE},
+                            timeout=6
+                        )
+                        if ps.status_code == 200:
+                            splits = ps.json().get("stats", [{}])[0].get("splits", [])
+                            if splits:
+                                era = splits[0].get("stat", {}).get("era")
+                                if era:
+                                    return float(era)
+                    except Exception:
+                        pass
+                    return None
+
+                home_era = get_era(home_p)
+                time.sleep(0.2)
+                away_era = get_era(away_p)
+                return home_era, away_era
+
+    except Exception:
+        pass
+    return None, None
+
+
+def pitcher_run_adjustment(home_era, away_era, league_avg_era=4.20):
+    """
+    Calcula ajuste de carreras esperadas basado en ERA de pitchers.
+    ERA promedio MLB ~4.20. Por cada punto de ERA sobre promedio,
+    se espera ~0.15 carreras más por partido.
+    Retorna (home_adj, away_adj) — factores multiplicadores para lambdas.
+    """
+    if home_era is None and away_era is None:
+        return 1.0, 1.0
+
+    # Si el pitcher local tiene ERA alto, el visitante anota más
+    away_scoring_adj = 1.0
+    if home_era is not None:
+        diff = home_era - league_avg_era
+        away_scoring_adj = max(min(1.0 + diff * 0.04, 1.25), 0.75)
+
+    # Si el pitcher visitante tiene ERA alto, el local anota más
+    home_scoring_adj = 1.0
+    if away_era is not None:
+        diff = away_era - league_avg_era
+        home_scoring_adj = max(min(1.0 + diff * 0.04, 1.25), 0.75)
+
+    return home_scoring_adj, away_scoring_adj
+
+
+def get_park_factor(home_team):
+    """Retorna el park factor del estadio local. Default 1.0."""
+    for key, val in MLB_PARK_FACTORS.items():
+        if fuzzy_match(home_team, key):
+            return val
+    return 1.0
+
+
+def get_weather_factor(home_team):
+    """
+    Obtiene el factor climático usando Open-Meteo (gratis, sin API key).
+    Viento fuerte = más carreras. Lluvia/frío = menos carreras.
+    Retorna factor multiplicador para el total esperado.
+    """
+    coords = None
+    for key, val in MLB_STADIUM_COORDS.items():
+        if fuzzy_match(home_team, key):
+            coords = val
+            break
+
+    if not coords:
+        return 1.0
+
+    try:
+        r = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude":  coords[0],
+                "longitude": coords[1],
+                "current":   "wind_speed_10m,temperature_2m,precipitation",
+                "wind_speed_unit": "mph",
+                "temperature_unit": "fahrenheit",
+            },
+            timeout=6
+        )
+        if r.status_code != 200:
+            return 1.0
+
+        current = r.json().get("current", {})
+        wind_mph  = float(current.get("wind_speed_10m", 0) or 0)
+        temp_f    = float(current.get("temperature_2m", 72) or 72)
+        precip    = float(current.get("precipitation", 0) or 0)
+
+        factor = 1.0
+
+        # Viento fuerte a favor del bateo
+        if wind_mph > 15:
+            factor += 0.04
+        elif wind_mph > 10:
+            factor += 0.02
+
+        # Temperatura fría reduce carreras
+        if temp_f < 50:
+            factor -= 0.04
+        elif temp_f < 60:
+            factor -= 0.02
+
+        # Lluvia reduce carreras
+        if precip > 0.1:
+            factor -= 0.03
+
+        return max(min(factor, 1.15), 0.85)
+
+    except Exception:
+        return 1.0
+
+
+def get_rest_days(team_id, key, sport_base, league_id, season):
+    """
+    Calcula los días de descanso del equipo desde su último partido.
+    Retorna (días de descanso, factor de ajuste).
+    """
+    try:
+        data = apis_get(sport_base, "games",
+                        {"league": league_id, "season": season,
+                         "team": team_id, "last": 3}, key)
+        if not data:
+            return None, 0.0
+
+        finished = [g for g in data
+                    if "Finished" in g.get("status", {}).get("long", "")]
+        if not finished:
+            return None, 0.0
+
+        last = sorted(finished,
+                      key=lambda x: x.get("date", {}).get("start", ""),
+                      reverse=True)[0]
+        date_str = last.get("date", {}).get("start", "")
+        if not date_str:
+            return None, 0.0
+
+        last_dt  = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        now_utc  = datetime.now(timezone.utc)
+        days_rest = (now_utc - last_dt).days
+
+        # Factor: back-to-back penaliza, descanso largo favorece
+        if days_rest == 0:
+            factor = -0.05   # Back-to-back — penaliza 5%
+        elif days_rest == 1:
+            factor = -0.02
+        elif days_rest >= 3:
+            factor = +0.03   # Bien descansado
+        else:
+            factor = 0.0
+
+        return days_rest, factor
+
+    except Exception:
+        return None, 0.0
+
+
+def combine_baseball(home, away, apibb_sig, mlb_home, mlb_away, sofa_sig, odds_move,
+                     home_era=None, away_era=None, date_str=None):
+    """
+    Béisbol — Pythagorean + API-Baseball + MLB Stats API
+    + Pitcher del día + Factor estadio + Clima
+    """
+    MLB_MIN_WIN_PCT = 0.45
 
     apib_hs = apibb_sig.get("home_form") or apibb_sig.get("home_stats") or {}
     apib_as = apibb_sig.get("away_form") or apibb_sig.get("away_stats") or {}
 
     def merge_stat(key, apib_val, mlb_val, default):
         v1 = apib_val.get(key); v2 = mlb_val.get(key)
-        # Forma reciente pesa 60%, temporada 40%
         if v1 and v2: return v1 * 0.60 + v2 * 0.40
         return v1 or v2 or default
 
@@ -907,30 +1174,45 @@ def combine_baseball(home, away, apibb_sig, mlb_home, mlb_away, sofa_sig, odds_m
     rs_a = max(min(merge_stat("runs_scored_pg",  apib_as, mlb_away, 4.5), 9.0), 2.0)
     ra_a = max(min(merge_stat("runs_allowed_pg", apib_as, mlb_away, 4.5), 9.0), 2.0)
 
-    # Pythagorean con ventaja local calibrada a +6% para MLB
+    # ── Ajuste por pitcher del día ───────────────────────────────
+    home_scoring_adj, away_scoring_adj = pitcher_run_adjustment(home_era, away_era)
+    rs_h *= home_scoring_adj  # Local anota más/menos según pitcher visitante
+    rs_a *= away_scoring_adj  # Visitante anota más/menos según pitcher local
+
+    # ── Factor de estadio ────────────────────────────────────────
+    park = get_park_factor(home)
+    rs_h *= park
+    rs_a *= park  # Ambos se benefician/perjudican del estadio
+
+    # ── Factor climático ─────────────────────────────────────────
+    weather = get_weather_factor(home)
+
+    # ── Total esperado con todos los factores ────────────────────
+    exp_total = round(((rs_h + ra_a) / 2) * weather, 2)
+
+    # ── Pythagorean con ventaja local +6% ────────────────────────
     hw = max(min(pythagorean(rs_h, ra_h, 1.83) + 0.06, 0.85), 0.15)
     aw = 1.0 - hw
 
-    # Filtro de récord mínimo — penaliza equipos con mal récord
+    # ── Filtro de récord mínimo ──────────────────────────────────
     home_win_pct = mlb_home.get("win_pct") or apib_hs.get("win_pct") or 0.5
     away_win_pct = mlb_away.get("win_pct") or apib_as.get("win_pct") or 0.5
 
     if home_win_pct < MLB_MIN_WIN_PCT:
-        hw *= 0.90  # Penaliza 10% a equipos en racha negativa
+        hw *= 0.90
     if away_win_pct < MLB_MIN_WIN_PCT:
         aw *= 0.90
 
-    # Normaliza después de penalización
     tot_raw = hw + aw
     hw = hw / tot_raw; aw = aw / tot_raw
 
-    # Ajuste H2H
+    # ── Ajuste H2H ───────────────────────────────────────────────
     h2h = apibb_sig.get("h2h")
     if h2h:
         adj = (h2h["win_pct"] - 0.5) * 0.08
         hw = max(min(hw + adj, 0.85), 0.15); aw = 1.0 - hw
 
-    # Sofascore
+    # ── Sofascore ────────────────────────────────────────────────
     l2_h = l2_a = None
     if sofa_sig:
         sf_tot = sofa_sig["home_form"] + sofa_sig["away_form"]
@@ -938,6 +1220,7 @@ def combine_baseball(home, away, apibb_sig, mlb_home, mlb_away, sofa_sig, odds_m
         l2_a = 1.0 - l2_h
 
     has_apibb = bool(apib_hs); has_mlb = bool(mlb_home); has_l2 = l2_h is not None
+    has_pitcher = home_era is not None or away_era is not None
     om = odds_move or {"home": 0.0, "away": 0.0}
 
     if has_apibb and has_mlb and has_l2:   w_base, w_l2, w_om = 0.70, 0.20, 0.10
@@ -948,17 +1231,19 @@ def combine_baseball(home, away, apibb_sig, mlb_home, mlb_away, sofa_sig, odds_m
     ch = hw * w_base + (l2_h or hw) * w_l2 + max(min(hw + om["home"], 0.95), 0.05) * w_om
     ca = aw * w_base + (l2_a or aw) * w_l2 + max(min(aw + om["away"], 0.95), 0.05) * w_om
     tot = ch + ca or 1.0
-    exp_total = round((rs_h + ra_a) / 2, 2)
 
     return {
         "home": ch/tot, "away": ca/tot, "draw": 0.0,
         "exp_total": exp_total,
-        "rs_home": round(rs_h, 2), "ra_home": round(ra_h, 2),
+        "park_factor": round(park, 2),
+        "weather_factor": round(weather, 2),
+        "home_era": home_era, "away_era": away_era,
         "home_win_pct": round(home_win_pct, 3),
         "away_win_pct": round(away_win_pct, 3),
         "has_l1": has_apibb or has_mlb, "has_l2": has_l2,
+        "has_pitcher": has_pitcher,
         "has_l3": bool(om["home"] != 0 or om["away"] != 0),
-        "src": "API-Baseball + MLB Stats API",
+        "src": "API-Baseball + MLB + Pitcher + Estadio + Clima",
     }
 
 
@@ -998,9 +1283,11 @@ def combine_general(home, away, hist_home, hist_away, sofa_sig, odds_move, has_d
 def best_h2h_pick(probs, odds, home, away, has_draw, model=""):
     """
     Retorna el pick con mayor edge.
-    Para béisbol exige edge mínimo de 4% (más estricto).
+    Para béisbol exige edge mínimo de 4%.
+    No recomienda equipos con probabilidad propia < 40% (evita sesgo underdog).
     """
     MIN_EDGE = 4.0 if model == "pythagorean_base" else 0.0
+    MIN_PROB = 0.40  # No recomendar equipos con menos del 40% de probabilidad real
 
     cands = [
         (home, probs["home"], odds["home"]),
@@ -1010,7 +1297,8 @@ def best_h2h_pick(probs, odds, home, away, has_draw, model=""):
         cands.append(("Empate", probs.get("draw", 0), odds["draw"]))
 
     ranked = [{"label":l,"prob":p,"odds":o,"edge":edge(p,o)}
-              for l,p,o in cands if o>1 and edge(p,o) >= MIN_EDGE]
+              for l,p,o in cands
+              if o > 1 and edge(p,o) >= MIN_EDGE and p >= MIN_PROB]
     ranked.sort(key=lambda x: x["edge"], reverse=True)
     return ranked[0] if ranked else None
 
@@ -1062,9 +1350,9 @@ def filter_mm_picks(probs, all_totals, model, unit):
         if model == "poisson" and lam_h and lam_a:
             mas_p, menos_p = poisson_line_prob(lam_h, lam_a, line)
         elif exp_t and exp_t > 0:
-            if "base" in model:     sigma = 2.8
-            elif "bball" in model:  sigma = max(exp_t * 0.06, 3.0)
-            else:                   sigma = 1.5
+            if "base" in model:     sigma = 2.8          # béisbol
+            elif "bball" in model:  sigma = 13.0         # basket NBA — varianza real ~13 puntos
+            else:                   sigma = 1.5          # general
             nd      = NormalDist(exp_t, sigma)
             menos_p = nd.cdf(line)
             mas_p   = 1.0 - menos_p
@@ -1302,20 +1590,50 @@ if st.button("🔄 Analizar partidos de hoy", use_container_width=True):
             elif cfg["model"] == "pythagorean_bball":
                 with st.spinner(f"🔬 Analizando {home} vs {away}..."):
                     apib_sig = build_basketball_signal(home, away, apif_key)
+
+                # Días de descanso para cada equipo
+                home_id_bball = apib_sig.get("home_form", {}).get("team_id") or \
+                               (apib_find_team(home, apib_all_teams(apif_key)) or {}).get("id")
+                away_id_bball = apib_sig.get("away_form", {}).get("team_id") or \
+                               (apib_find_team(away, apib_all_teams(apif_key)) or {}).get("id")
+
+                home_rest_days = home_rest_factor = None
+                away_rest_days = away_rest_factor = None
+
+                if home_id_bball:
+                    home_rest_days, home_rest_factor = get_rest_days(
+                        home_id_bball, apif_key, APIB_BASE, NBA_LEAGUE_ID, SEASON_BBALL)
+                    time.sleep(0.2)
+                if away_id_bball:
+                    away_rest_days, away_rest_factor = get_rest_days(
+                        away_id_bball, apif_key, APIB_BASE, NBA_LEAGUE_ID, SEASON_BBALL)
+
                 hist_h = {"win_pct":0.52,"pts_for_pg":112.0,"pts_ag_pg":112.0}
                 hist_a = {"win_pct":0.48,"pts_for_pg":110.0,"pts_ag_pg":112.0}
-                probs  = combine_basketball(home, away, apib_sig, sofa_sig, hist_h, hist_a, odds_mov)
+                probs  = combine_basketball(home, away, apib_sig, sofa_sig, hist_h, hist_a,
+                                            odds_mov,
+                                            home_rest_factor=home_rest_factor or 0.0,
+                                            away_rest_factor=away_rest_factor or 0.0)
                 fix_id = None
 
             elif cfg["model"] == "pythagorean_base":
                 with st.spinner(f"🔬 Analizando {home} vs {away}..."):
                     apibb_sig = build_baseball_signal(home, away, apif_key)
+
                 mlb_h_id = mlb_find_id(home, mlb_teams_cache)
                 mlb_a_id = mlb_find_id(away, mlb_teams_cache)
                 mlb_h    = mlb_team_stats(mlb_h_id) if mlb_h_id else {}
                 mlb_a    = mlb_team_stats(mlb_a_id) if mlb_a_id else {}
-                probs    = combine_baseball(home, away, apibb_sig, mlb_h, mlb_a, sofa_sig, odds_mov)
-                fix_id   = None
+
+                # Pitcher del día + clima
+                with st.spinner(f"⚾ Pitcher + clima: {home} vs {away}..."):
+                    home_era, away_era = get_probable_pitchers(home, away, today)
+
+                probs = combine_baseball(home, away, apibb_sig, mlb_h, mlb_a,
+                                         sofa_sig, odds_mov,
+                                         home_era=home_era, away_era=away_era,
+                                         date_str=today)
+                fix_id = None
 
             else:
                 probs  = combine_general(home, away, {"win_pct":0.52}, {"win_pct":0.48},
