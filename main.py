@@ -1271,9 +1271,57 @@ def combine_general(home, away, hist_home, hist_away, sofa_sig, odds_move, has_d
     return r
 
 
-# ══════════════════════════════════════════════════════════════════
-#  12. PICKS
-# ══════════════════════════════════════════════════════════════════
+def calibrate_baseball_probs(probs):
+    """
+    Calibración de probabilidades para béisbol.
+
+    Gemini identifica el problema correctamente:
+    - Modelos sin calibrar sobreestiman confianza
+    - En béisbol los mejores modelos del mundo no pasan del 65% en ganador
+      ni del 68% en totales
+    - Un edge de 25%+ indica error de calibración, no ventaja real
+
+    Solución: aplicar corrección hacia la media (shrinkage) para
+    acercar las probabilidades a rangos realistas del mercado.
+
+    Fórmula: p_calibrada = 0.5 + (p_modelo - 0.5) * factor_shrinkage
+    Con factor 0.65 → un 88% se convierte en ~74%
+                    → un 80% se convierte en ~70%
+                    → un 65% se convierte en ~60%
+    """
+    SHRINKAGE     = 0.65   # Factor de contracción hacia 50%
+    MAX_WIN_PROB  = 0.65   # Máximo realista para ganador béisbol
+    MAX_MM_PROB   = 0.68   # Máximo realista para Más/Menos béisbol
+
+    calibrated = dict(probs)
+
+    # Calibrar probabilidades de ganador
+    for key in ["home", "away"]:
+        p = probs.get(key, 0.5)
+        p_cal = 0.5 + (p - 0.5) * SHRINKAGE
+        p_cal = max(min(p_cal, MAX_WIN_PROB), 0.15)
+        calibrated[key] = p_cal
+
+    # Renormalizar
+    tot = calibrated["home"] + calibrated["away"]
+    if tot > 0:
+        calibrated["home"] /= tot
+        calibrated["away"] /= tot
+
+    return calibrated
+
+
+def calibrate_mm_prob(prob, model):
+    """
+    Calibra la probabilidad de Más/Menos para béisbol.
+    Aplica el mismo shrinkage + tope realista.
+    """
+    if model != "pythagorean_base":
+        return prob
+    SHRINKAGE    = 0.65
+    MAX_MM_PROB  = 0.68
+    p_cal = 0.5 + (prob - 0.5) * SHRINKAGE
+    return max(min(p_cal, MAX_MM_PROB), 0.30)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1358,6 +1406,10 @@ def filter_mm_picks(probs, all_totals, model, unit):
             mas_p   = 1.0 - menos_p
         else:
             continue
+
+        # Calibración béisbol — corrige sobreestimación
+        mas_p   = calibrate_mm_prob(mas_p, model)
+        menos_p = calibrate_mm_prob(menos_p, model)
 
         # Evalúa Más
         if (mas_p >= MM_PROB_THRESHOLD
@@ -1450,14 +1502,31 @@ def render_combinada(value_picks):
         st.info("Sin picks con valor suficiente para armar combinada hoy.")
         return
 
-    # Toma los 4 mejores picks por probabilidad — no todos
-    best = sorted(value_picks, key=lambda x: x["prob"], reverse=True)[:4]
+    # Diversificar — máximo 2 picks del mismo mercado
+    market_count = {}
+    diversified  = []
+    for p in sorted(value_picks, key=lambda x: x["prob"], reverse=True):
+        # Identificar mercado base (Más/Menos, Ganador)
+        label = p["label"]
+        if "Más de" in label or "Menos de" in label:
+            market = "mm"
+        else:
+            market = "ganador"
 
-    cuota = math.prod(p["odds"] for p in best if p.get("odds",0) > 1)
+        count = market_count.get(market, 0)
+        if count < 2:
+            diversified.append(p)
+            market_count[market] = count + 1
+
+        if len(diversified) >= 4:
+            break
+
+    best  = diversified
+    cuota = math.prod(p["odds"] for p in best if p.get("odds", 0) > 1)
     prob  = math.prod(p["prob"] for p in best)
 
     st.markdown("### 🎯 Combinada del día")
-    st.caption(f"Top {len(best)} picks por probabilidad")
+    st.caption(f"Top {len(best)} picks — máx. 2 por mercado")
 
     for p in best:
         col1, col2 = st.columns([5, 1])
@@ -1633,6 +1702,8 @@ if st.button("🔄 Analizar partidos de hoy", use_container_width=True):
                                          sofa_sig, odds_mov,
                                          home_era=home_era, away_era=away_era,
                                          date_str=today)
+                # Calibración — corrige sobreestimación del modelo
+                probs = calibrate_baseball_probs(probs)
                 fix_id = None
 
             else:
